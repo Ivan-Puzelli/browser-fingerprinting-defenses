@@ -1,0 +1,73 @@
+# Publish source code, tests, requirements, documentation, static assets,
+# instrumentation patches and the compiled paper. Keep personal measurements,
+# regenerable outputs and the manuscript sources local.
+
+# --- private measurements --------------------------------------------------
+# Includes results, future collections, smoke tests and compressed datasets.
+# The notebook needs local data to run; ignored data is not part of a clone.
+/experiment/data/
+*.jsonl
+*.jsonl.*
+/experiment/profiles/
+
+# --- generated outputs -----------------------------------------------------
+# figures/ is regenerated from the dataset, so it stays local - except the six
+# the paper prints, which a cloner cannot rebuild without the dataset.
+/experiment/figures/*
+!/experiment/figures/anonymity_sets.pdf
+!/experiment/figures/canvas_mechanism.pdf
+!/experiment/figures/component_heatmap.pdf
+!/experiment/figures/similarity_separation.pdf
+!/experiment/figures/canvas_utility_brave.png
+!/experiment/figures/canvas_utility_tor.png
+# Saved notebook outputs contain measurements and embedded images. Publish the
+# generator (build_analysis_nb.py), which recreates an output-free notebook.
+/experiment/analysis.ipynb
+.ipynb_checkpoints/
+*.log
+
+# --- the paper -------------------------------------------------------------
+# Only the compiled PDF is published; the LaTeX sources stay local.
+/paper4/*
+!/paper4/paper.pdf
+
+# --- LaTeX build artifacts -------------------------------------------------
+# Rewritten by latexmk on every build, in whichever directory it runs.
+*.aux
+*.bbl
+*.blg
+*.fdb_latexmk
+*.fls
+*.out
+*.synctex.gz
+*.toc
+
+# --- local write-ups and research material ---------------------------------
+/paper/
+/paper3/
+/paper5/
+/archive/
+/notes/
+/experiment/FINDINGS.md
+
+# --- environments and caches ----------------------------------------------
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# --- upstream development checkout ----------------------------------------
+# Keep experiment/static/fp.umd.js and experiment/patches/ included: collection
+# uses the prebuilt bundle and does not need this checkout or node_modules.
+/fingerprintjs/
+node_modules/
+
+# --- secrets and local settings -------------------------------------------
+.env
+.env.*
+!.env.example
+/.vscode/
+.DS_Store
+.editorconfig

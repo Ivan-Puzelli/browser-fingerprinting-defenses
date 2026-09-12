@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<!--
+  Canvas utility demonstration.
+
+  The point of this page is that both defenses act at EXTRACTION, not at
+  rendering. So the same canvas is shown twice, side by side:
+
+    left   the live <canvas> element, painted by the compositor
+    right  an <img> whose src is that canvas's toDataURL() output
+
+  Under an undefended browser the two panes are identical. Under Brave they
+  are still identical to the eye (the mask is +-1 on ~1.8% of pixels). Under
+  Gecko RFP/Tor the right pane is whatever the readout API substitutes.
+
+  The second row is a QR code, so the comparison is not a matter of opinion:
+  either the exported pane still scans or it does not. Scanning is left to an
+  external reader on purpose. Decoding it in-page would mean drawing the
+  exported PNG onto a second canvas and calling getImageData(), a read the
+  defense under test would perturb in turn - the failure would then have two
+  causes instead of one.
+
+  The page states no verdict. It reports two measurements and shows the two
+  panes; the reader compares them.
+
+  Both measurements are single-read comparisons on the SAME canvas, which
+  matters: decoding an exported PNG back into pixels would require a second
+  getImageData on a second canvas, and that read is itself subject to the
+  defense being measured. Comparing two reads of one canvas has no such
+  confound.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Canvas readout utility</title>
+<style>
+  :root {
+    --ink: #14161a;
+    --muted: #6b7280;
+    --line: #e3e6ea;
+    --bg: #f7f8fa;
+    --card: #ffffff;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 16px 18px 20px;
+    background: var(--bg);
+    color: var(--ink);
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 720px; margin: 0 auto; }
+
+  header { margin-bottom: 12px; }
+  h1 { font-size: 18px; margin: 0 0 3px; letter-spacing: -0.01em; }
+  .sub { color: var(--muted); font-size: 12.5px; margin: 0; }
+  .ua {
+    margin-top: 8px; padding: 6px 9px; border: 1px solid var(--line);
+    border-radius: 6px; background: var(--card);
+    font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: var(--muted); word-break: break-all;
+  }
+  .ua b { color: var(--ink); font-weight: 600; }
+
+  .card {
+    background: var(--card); border: 1px solid var(--line); border-radius: 9px;
+    padding: 12px; margin-bottom: 10px;
+  }
+  .card h2 { font-size: 13.5px; margin: 0 0 2px; }
+  .card p.desc { margin: 0 0 9px; color: var(--muted); font-size: 12px; }
+
+  .panes { display: flex; gap: 12px; align-items: flex-start; }
+  .pane { flex: 1 1 0; min-width: 0; }
+  .pane .label {
+    font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.05em;
+    color: var(--muted); margin-bottom: 5px;
+  }
+  .pane .label b { color: var(--ink); font-weight: 600; letter-spacing: 0; text-transform: none; }
+  .frame {
+    border: 1px solid var(--line); border-radius: 6px; overflow: hidden;
+    background: #fff; line-height: 0;
+  }
+  canvas, .frame img { display: block; width: 100%; height: auto; }
+
+  table.metrics {
+    width: 100%; border-collapse: collapse;
+    font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  table.metrics td { padding: 4px 0; border-top: 1px solid var(--line); vertical-align: top; }
+  table.metrics tr:first-child td { border-top: 0; }
+  table.metrics td:first-child {
+    color: var(--muted); padding-right: 14px; white-space: nowrap;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  }
+  .note { margin: 10px 0 0; font-size: 11.5px; color: var(--muted); }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <h1>Canvas readout under anti-fingerprinting defenses</h1>
+    <p class="sub">Each row shows one canvas twice: as the compositor paints it, and as
+      <code>toDataURL()</code> returns it. Defenses that act at extraction time change only the right pane.</p>
+    <div class="ua"><b id="ua-line">&nbsp;</b></div>
+  </header>
+
+  <div class="card">
+    <h2>1 &mdash; Signature capture</h2>
+    <p class="desc">A signature pad exports the stroke as PNG for storage or submission.</p>
+    <div class="panes">
+      <div class="pane">
+        <div class="label">Rendered &mdash; <b>&lt;canvas&gt;</b></div>
+        <div class="frame"><canvas id="signature-canvas" width="330" height="132"></canvas></div>
+      </div>
+      <div class="pane">
+        <div class="label">Exported &mdash; <b>toDataURL()</b></div>
+        <div class="frame"><img id="signature-preview" alt="exported signature"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>2 &mdash; QR ticket</h2>
+    <p class="desc">A QR code is generated in the browser and exported as PNG, the way a ticket,
+      a check-in pass or a 2FA enrolment screen does. <b>Scan both panes:</b> whether the export
+      still carries the payload is a functional test, not a visual judgement.</p>
+    <div class="panes">
+      <div class="pane">
+        <div class="label">Rendered &mdash; <b>&lt;canvas&gt;</b></div>
+        <div class="frame"><canvas id="watermark-canvas" width="330" height="190"></canvas></div>
+      </div>
+      <div class="pane">
+        <div class="label">Exported &mdash; <b>toDataURL()</b></div>
+        <div class="frame"><img id="watermark-preview" alt="exported watermark"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Measured &mdash; two consecutive reads of the signature canvas</h2>
+    <p class="desc">Nothing is drawn between the two reads, so an untouched readout path must return
+      the same bytes twice.</p>
+    <table class="metrics">
+      <tr><td><code>toDataURL()</code> &times;2 identical</td><td id="m-datdurl">&mdash;</td></tr>
+      <tr><td><code>getImageData()</code> &times;2, pixels differing</td><td id="m-pixels">&mdash;</td></tr>
+      <tr><td>max channel delta between the two reads</td><td id="m-delta">&mdash;</td></tr>
+      <tr><td>exported PNG payload</td><td id="m-bytes">&mdash;</td></tr>
+    </table>
+    <p class="note">Both rows compare two reads of one canvas. Decoding the exported PNG back into
+      pixels would need a further <code>getImageData()</code>, which the defense under test would
+      itself perturb.</p>
+  </div>
+
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  function drawSignature(ctx, w, h) {
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, w, h);
+
+    ctx.strokeStyle = "#c8ced6";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(22, h - 28);
+    ctx.lineTo(w - 22, h - 28);
+    ctx.stroke();
+
+    ctx.fillStyle = "#9aa3ad";
+    ctx.font = "10px Helvetica, Arial, sans-serif";
+    ctx.fillText("Sign here", 22, h - 12);
+
+    // The stroke: two bezier runs plus a flourish, so the rasterizer has
+    // curves, joins and antialiasing to disagree about.
+    ctx.strokeStyle = "#1b3a6b";
+    ctx.lineWidth = 2.6;
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    ctx.beginPath();
+    ctx.moveTo(34, 62);
+    ctx.bezierCurveTo(56, 14, 74, 78, 96, 44);
+    ctx.bezierCurveTo(113, 18, 125, 70, 147, 52);
+    ctx.bezierCurveTo(164, 38, 172, 68, 192, 42);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(192, 44);
+    ctx.bezierCurveTo(219, 22, 241, 74, 276, 36);
+    ctx.stroke();
+    ctx.lineWidth = 1.4;
+    ctx.beginPath();
+    ctx.moveTo(40, 70);
+    ctx.bezierCurveTo(110, 82, 200, 78, 288, 62);
+    ctx.stroke();
+
+    ctx.fillStyle = "#1b3a6b";
+    ctx.font = "italic 13px Georgia, 'Times New Roman', serif";
+    ctx.fillText("I. Puzelli", 34, 94);
+
+  }
+
+  var QR_PAYLOAD = "Export intact - Data Protection";
+  var QR = [
+    "11111110110010111001001111111",
+    "10000010000000110100101000001",
+    "10111010111101010101001011101",
+    "10111010101100001011001011101",
+    "10111010001011011010001011101",
+    "10000010101110100011101000001",
+    "11111110101010101010101111111",
+    "00000000110110000100100000000",
+    "01010111110101101000011101101",
+    "00001100111101011100101001001",
+    "01011110010010000111010010110",
+    "00010001011001010011010000100",
+    "11110110111100111100001101011",
+    "11001101101100010011110000110",
+    "01111010011101011110001100011",
+    "11100100010011100110111100010",
+    "11010111000111010100110110010",
+    "00010001101001110000011100110",
+    "10010010011111001000101010111",
+    "00010101011011111100111101000",
+    "10100111111100101010111110110",
+    "00000000110010000001100011010",
+    "11111110110101101100101011110",
+    "10000010101001111010100010110",
+    "10111010001100111100111110001",
+    "10111010100110111101001010001",
+    "10111010011001001110100011001",
+    "10000010101011001100101011010",
+    "11111110010000010110111101010",
+  ];
+
+  // Modules come from a library-generated version-3 QR at ECC Q; the page
+  // only rasterises them. Drawing it here rather than shipping an image
+  // matters: it must be the canvas that produces the code, so that the
+  // readout path is what the export exercises.
+  function drawQR(ctx, w, h) {
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, w, h);
+
+    var n = QR.length, box = 150, pad = 16;
+    var cell = box / n, x0 = pad, y0 = (h - box) / 2;
+
+    ctx.fillStyle = "#0f1115";
+    for (var r = 0; r < n; r++) {
+      for (var c = 0; c < n; c++) {
+        if (QR[r][c] === "1") {
+          // +0.5 so adjacent modules meet with no hairline seam.
+          ctx.fillRect(x0 + c * cell, y0 + r * cell, cell + 0.5, cell + 0.5);
+        }
+      }
+    }
+
+    var tx = x0 + box + 20;
+    ctx.fillStyle = "#0f1115";
+    ctx.font = "bold 15px Helvetica, Arial, sans-serif";
+    ctx.fillText("Data Protection", tx, y0 + 24);
+    ctx.fillStyle = "#6b7280";
+    ctx.font = "10px Helvetica, Arial, sans-serif";
+    ctx.fillText("scan to verify", tx, y0 + 44);
+
+    ctx.strokeStyle = "#d7dbe0";
+    ctx.lineWidth = 1;
+    ctx.setLineDash([3, 3]);
+    ctx.beginPath();
+    ctx.moveTo(tx - 10, y0 + 4);
+    ctx.lineTo(tx - 10, y0 + box - 4);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    ctx.fillStyle = "#9aa3ad";
+    ctx.font = "9px Helvetica, Arial, sans-serif";
+    ctx.fillText("payload: " + QR_PAYLOAD, x0, h - 10);
+  }
+
+  var sig = document.getElementById("signature-canvas");
+  var wm = document.getElementById("watermark-canvas");
+  var sctx = sig.getContext("2d", { willReadFrequently: true });
+  var wctx = wm.getContext("2d");   // the QR ticket
+
+  drawSignature(sctx, sig.width, sig.height);
+  drawQR(wctx, wm.width, wm.height);
+
+  // Export path, exactly what a real application calls.
+  var exportA = sig.toDataURL("image/png");
+  var exportB = sig.toDataURL("image/png");
+  document.getElementById("signature-preview").src = exportA;
+  document.getElementById("watermark-preview").src = wm.toDataURL("image/png");
+
+  // Pixel-level comparison of two reads of the same untouched canvas.
+  var a = sctx.getImageData(0, 0, sig.width, sig.height).data;
+  var b = sctx.getImageData(0, 0, sig.width, sig.height).data;
+  var total = sig.width * sig.height;
+  var differing = 0, maxDelta = 0;
+  for (var i = 0; i < a.length; i += 4) {
+    var d = 0;
+    for (var c = 0; c < 4; c++) {
+      var delta = Math.abs(a[i + c] - b[i + c]);
+      if (delta > d) d = delta;
+    }
+    if (d > 0) differing++;
+    if (d > maxDelta) maxDelta = d;
+  }
+
+  var pct = (100 * differing / total).toFixed(2);
+  var payload = Math.round((exportA.length - exportA.indexOf(",") - 1) * 3 / 4);
+
+  var results = {
+    identicalExports: exportA === exportB,
+    pixelsDiffering: differing,
+    pixelsTotal: total,
+    pixelsPct: Number(pct),
+    maxChannelDelta: maxDelta,
+    pngBytes: payload,
+    userAgent: navigator.userAgent
+  };
+
+  document.getElementById("m-datdurl").textContent =
+    results.identicalExports ? "yes" : "no";
+  document.getElementById("m-pixels").textContent =
+    differing.toLocaleString() + " of " + total.toLocaleString() + "  (" + pct + "%)";
+  document.getElementById("m-delta").textContent = String(maxDelta);
+  document.getElementById("m-bytes").textContent =
+    payload.toLocaleString() + " bytes";
+  document.getElementById("ua-line").textContent = navigator.userAgent;
+
+  window.__demoResults = results;
+  window.__demoReady = true;
+})();
+</script>
+</body>
+</html>

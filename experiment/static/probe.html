@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>FP probe</title>
+<style>
+  body { font: 13px/1.5 ui-monospace, Menlo, monospace; margin: 1.2rem; }
+  #status { font-weight: 700; }
+  pre { white-space: pre-wrap; word-break: break-all; max-height: 60vh; overflow: auto;
+        background: #f4f4f4; padding: .6rem; border: 1px solid #ccc; }
+</style>
+</head>
+<body>
+<h1>Fingerprinting probe</h1>
+<p id="status">running…</p>
+
+<!--
+  Tor Browser at security level "Safest" disables JavaScript entirely, so none
+  of the script below ever executes and the page produces no fingerprint at all.
+  That is a result, not a gap: this <noscript> beacon fires a plain image request
+  so the server can still record what a tracker CAN see with no JS available —
+  request headers, header ordering, and (at the network layer) the TLS
+  handshake. Everything else is unmeasurable by design.
+-->
+<noscript>
+  <img src="/collect-passive?__QS__" alt="" width="1" height="1" style="position:absolute;left:-9999px">
+  <p><b>JavaScript is disabled.</b> No JS-based fingerprint can be collected.
+     A passive, header-only observation has been recorded server-side.</p>
+</noscript>
+<p>A run is marked done only after <code>/collect</code> confirms saving it. The JSON below is the payload,
+   shown for inspection; the button copies it to the clipboard.</p>
+<button id="copy">Copy JSON</button>
+<pre id="result">…</pre>
+
+<script src="/fp.umd.js"></script>
+<script>
+(function () {
+  'use strict';
+
+  // The Selenium driver passes its run metadata in the query string, so a
+  // single static page serves every arm of the design without being rebuilt.
+  var q = new URLSearchParams(location.search);
+  var meta = {
+    browser:   q.get('browser')   || 'manual-unknown',
+    level:     parseInt(q.get('level') || '0', 10),
+    run_index: parseInt(q.get('run') || '0', 10),
+    automated: q.get('automated') === '1',
+    note:      q.get('note') || ''
+  };
+
+  function fail(stage, err) {
+    var payload = Object.assign({}, meta, {
+      timestamp: new Date().toISOString(),
+      domain: location.hostname,
+      error_stage: stage,
+      error: String(err && err.stack || err)
+    });
+    persist(payload);
+  }
+
+  function render(obj) {
+    document.getElementById('result').textContent = JSON.stringify(obj, null, 2);
+    document.getElementById('status').textContent = obj.error ? 'ERROR' : 'done';
+    // A stable DOM marker the Selenium script can wait on, so it never scrapes
+    // a half-written result.
+    document.body.setAttribute('data-probe-state', obj.error ? 'error' : 'done');
+  }
+
+  function post(obj) {
+    return fetch('/collect', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(obj)
+    }).then(function (response) {
+      if (!response.ok) throw new Error('Collection HTTP ' + response.status);
+    });
+  }
+
+  function persist(payload) {
+    document.getElementById('result').textContent = JSON.stringify(payload, null, 2);
+    document.getElementById('status').textContent = 'saving…';
+    return post(payload).then(function () {
+      render(payload);
+    }).catch(function (err) {
+      // Keep the original measurement available for manual recovery. Do not
+      // recursively POST on a failed connection or report an unsaved run done.
+      document.getElementById('status').textContent = 'SAVE ERROR: ' + String(err);
+      document.body.setAttribute('data-probe-state', 'error');
+    });
+  }
+
+  document.getElementById('copy').addEventListener('click', function () {
+    navigator.clipboard.writeText(document.getElementById('result').textContent);
+  });
+
+  if (typeof FingerprintJS === 'undefined') {
+    fail('bundle-load', 'FingerprintJS global is undefined — the local bundle did not load');
+    return;
+  }
+
+  // ── LEVEL 1 ───────────────────────────────────────────────────────────────
+  // Two consecutive calls, same script execution, nothing in between.
+  //
+  // getRawCanvasFingerprint() is the patched entry point. It returns the raw
+  // toDataURL() output every time instead of the library's categorical labels
+  // ("skipped" / "unstable"), because two calls that both return the *string*
+  // "unstable" would otherwise compare equal and score a fully-randomising
+  // browser as perfectly stable. It also reports what upstream would have said,
+  // so the paper can quote both.
+  var t0 = performance.now();
+  var call1, call2;
+  try {
+    call1 = FingerprintJS.getRawCanvasFingerprint();
+    call2 = FingerprintJS.getRawCanvasFingerprint();
+  } catch (e) {
+    fail('level1-canvas', e);
+    return;
+  }
+
+  // The library's own stabilised and semi-stabilised variants, for reference:
+  // this is what a real integrator would have seen on this browser.
+  var libraryCanvasUnstable = null;
+  try {
+    libraryCanvasUnstable = FingerprintJS.getUnstableCanvasFingerprint(false);
+  } catch (e) {
+    libraryCanvasUnstable = { error: String(e) };
+  }
+
+  // ── FULL COMPONENT SET ────────────────────────────────────────────────────
+  // monitoring:false  — suppresses the library's built-in 0.1%-probability
+  //                     outbound telemetry beacon to m1.openfpcdn.io, an
+  //                     uncontrolled network variable in a controlled experiment
+  //                     (and the experiment is meant to run fully offline).
+  // delayFallback:50  — pins the idle-callback timeout so browser-specific idle
+  //                     scheduling is not a confound between runs.
+  FingerprintJS.load({ monitoring: false, delayFallback: 50 })
+    .then(function (agent) { return agent.get({ debug: false }); })
+    .then(function (result) {
+      var payload = Object.assign({}, meta, {
+        timestamp: new Date().toISOString(),
+        domain: location.hostname,
+        page_url: location.href,
+
+        level1_canvas_call1: call1,
+        level1_canvas_call2: call2,
+        library_canvas_unstable: libraryCanvasUnstable,
+
+        visitorId: result.visitorId,
+        confidence: result.confidence,
+        components: result.components,
+
+        // Three-way outcome of the patched WEBGL_debug_renderer_info read.
+        webgl_debug_renderer_status: FingerprintJS.getDebugRendererInfoStatus(),
+        webgl_upstream_would_skip: FingerprintJS.wouldUpstreamSkipDebugRendererInfo(),
+
+        perf_now_ms: performance.now(),
+        probe_duration_ms: performance.now() - t0,
+        navigator_user_agent: navigator.userAgent
+      });
+      return persist(payload);
+    })
+    .catch(function (e) { fail('agent-get', e); });
+})();
+</script>
+</body>
+</html>

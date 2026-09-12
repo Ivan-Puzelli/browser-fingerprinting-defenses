@@ -1,0 +1,224 @@
+--- a/src/index.ts	2026-08-19 14:58:17
++++ b/src/index.ts	2026-08-19 14:59:16
+@@ -33,7 +33,18 @@
+ export { getUnstableScreenFrame } from './sources/screen_frame'
+ export { getUnstableScreenResolution } from './sources/screen_resolution'
+ export { getWebGLContext } from './sources/webgl'
++
++// ── EXPERIMENT PATCH (dp_project) ────────────────────────────────────────────
++// Raw, never-relabelled canvas output + the three-way WEBGL_debug_renderer_info
++// outcome. See sources/canvas.ts and sources/webgl.ts for why these exist.
++export { getRawCanvasFingerprint, RawCanvasFingerprint } from './sources/canvas'
+ export {
++  getDebugRendererInfoStatus,
++  wouldUpstreamSkipDebugRendererInfo,
++  DebugRendererInfoStatus,
++} from './sources/webgl'
++// ── END EXPERIMENT PATCH ─────────────────────────────────────────────────────
++export {
+   getFullscreenElement,
+   isAndroid,
+   isTrident,
+--- a/src/sources/canvas.ts	2026-08-19 14:58:17
++++ b/src/sources/canvas.ts	2026-08-19 14:58:37
+@@ -53,6 +53,78 @@
+   return { winding, geometry, text }
+ }
+ 
++/**
++ * ── EXPERIMENT PATCH (dp_project) ────────────────────────────────────────────
++ * A version of the canvas entropy source with NO stabilization and NO
++ * categorical relabelling.
++ *
++ * `getCanvasFingerprint()` hides two different things behind literal strings:
++ *   - `"skipped"`  when `doesBrowserPerformAntiFingerprinting()` is true
++ *                  (Safari 17+ / Firefox 120+), and
++ *   - `"unstable"` whenever `textImage1 !== textImage2` inside `renderImages()`
++ *                  (the anti-Brave trap, GitHub issue #791).
++ *
++ * `getUnstableCanvasFingerprint(false)` removes only the first of those two.
++ * The second one still collapses the measurement: if a browser noises every
++ * single `toDataURL()` call, BOTH consecutive top-level calls return the
++ * literal string `"unstable"`, and a naive equality test would score that
++ * browser as perfectly *stable*. That is the exact opposite of the truth.
++ *
++ * This function therefore returns the raw `toDataURL()` output of every render,
++ * every time, on every browser, and reports the within-call comparison as a
++ * separate boolean instead of overwriting the data with a verdict.
++ */
++export interface RawCanvasFingerprint {
++  /** Whether the 2D context supports the even-odd winding rule. */
++  winding: boolean
++  /** First raw `toDataURL()` of the text image. Never relabelled. */
++  textImage1: string
++  /** Second raw `toDataURL()` of the same, unmodified text image. Never relabelled. */
++  textImage2: string
++  /** Raw `toDataURL()` of the geometry image. Never relabelled. */
++  geometryImage: string
++  /**
++   * What the upstream library WOULD have reported, so the experiment can quote
++   * both the raw data and the library's verdict from a single measurement.
++   */
++  upstreamVerdict: 'unsupported' | 'skipped' | 'unstable' | 'measured'
++}
++
++export function getRawCanvasFingerprint(): RawCanvasFingerprint {
++  const [canvas, context] = makeCanvasContext()
++
++  if (!isSupported(canvas, context)) {
++    return {
++      winding: false,
++      textImage1: '',
++      textImage2: '',
++      geometryImage: '',
++      upstreamVerdict: ImageStatus.Unsupported,
++    }
++  }
++
++  const winding = doesSupportWinding(context)
++
++  renderTextImage(canvas, context)
++  const textImage1 = canvasToString(canvas)
++  const textImage2 = canvasToString(canvas)
++
++  renderGeometryImage(canvas, context)
++  const geometryImage = canvasToString(canvas)
++
++  let upstreamVerdict: RawCanvasFingerprint['upstreamVerdict']
++  if (doesBrowserPerformAntiFingerprinting()) {
++    upstreamVerdict = ImageStatus.Skipped
++  } else if (textImage1 !== textImage2) {
++    upstreamVerdict = ImageStatus.Unstable
++  } else {
++    upstreamVerdict = 'measured'
++  }
++
++  return { winding, textImage1, textImage2, geometryImage, upstreamVerdict }
++}
++/** ── END EXPERIMENT PATCH ──────────────────────────────────────────────────── */
++
+ function makeCanvasContext() {
+   const canvas = document.createElement('canvas')
+   canvas.width = 1
+--- a/src/sources/webgl.ts	2026-08-19 14:58:17
++++ b/src/sources/webgl.ts	2026-08-19 14:59:05
+@@ -83,14 +83,17 @@
+     return STATUS_GET_PARAMETER_NOT_A_FUNCTION
+   }
+ 
+-  const debugExtension = shouldAvoidDebugRendererInfo() ? null : gl.getExtension(rendererInfoExtensionName)
++  // ── EXPERIMENT PATCH (dp_project): always attempt the read, and record which
++  // of the three genuinely different outcomes occurred. See the note on
++  // `debugRendererInfoStatus` below.
++  const debugExtension = acquireDebugRendererInfo(gl)
+ 
+   return {
+     version: gl.getParameter(gl.VERSION)?.toString() || '',
+     vendor: gl.getParameter(gl.VENDOR)?.toString() || '',
+-    vendorUnmasked: debugExtension ? gl.getParameter(debugExtension.UNMASKED_VENDOR_WEBGL)?.toString() : '',
++    vendorUnmasked: readUnmasked(gl, debugExtension, 'UNMASKED_VENDOR_WEBGL'),
+     renderer: gl.getParameter(gl.RENDERER)?.toString() || '',
+-    rendererUnmasked: debugExtension ? gl.getParameter(debugExtension.UNMASKED_RENDERER_WEBGL)?.toString() : '',
++    rendererUnmasked: readUnmasked(gl, debugExtension, 'UNMASKED_RENDERER_WEBGL'),
+     shadingLanguageVersion: gl.getParameter(gl.SHADING_LANGUAGE_VERSION)?.toString() || '',
+   }
+ }
+@@ -235,13 +238,94 @@
+ }
+ 
+ /**
+- * Some browsers print a console warning when the WEBGL_debug_renderer_info extension is requested.
+- * JS Agent aims to avoid printing messages to console, so we avoid this extension in that browsers.
+- */
+-export function shouldAvoidDebugRendererInfo(): boolean {
++ * ── EXPERIMENT PATCH (dp_project) ────────────────────────────────────────────
++ * Upstream this function returns `true` for Gecko. The reason given in the
++ * upstream comment is *cosmetic* — Firefox prints a console warning when
++ * `WEBGL_debug_renderer_info` is requested, and the JS Agent aims not to write
++ * to the console. It is NOT because Firefox blocks the read.
++ *
++ * The consequence is that upstream FingerprintJS reports `vendorUnmasked: ''`
++ * and `rendererUnmasked: ''` on every Firefox, which is indistinguishable from
++ * a Firefox that genuinely refuses the read (e.g. under
++ * `privacy.resistFingerprinting`). Those are three different states and this
++ * experiment must not collapse them into one empty string:
++ *
++ *   - `library-skipped`  the library declined to even ask;
++ *   - `read-succeeded`   the extension was granted and returned a real value;
++ *   - `browser-blocked`  the library asked and the browser refused (extension
++ *                        absent, `getParameter` threw, or an empty value came
++ *                        back).
++ *
++ * So: always attempt the read, wrapped in try/catch, and publish the outcome.
++ */
++export type DebugRendererInfoStatus = 'not-attempted' | 'library-skipped' | 'read-succeeded' | 'browser-blocked'
++
++let debugRendererInfoStatus: DebugRendererInfoStatus = 'not-attempted'
++
++/** Reads the outcome of the most recent `WEBGL_debug_renderer_info` attempt. */
++export function getDebugRendererInfoStatus(): DebugRendererInfoStatus {
++  return debugRendererInfoStatus
++}
++
++/**
++ * Whether *upstream* FingerprintJS would have skipped the extension on this
++ * browser. Kept as a separate, reportable fact rather than as control flow, so
++ * the experiment can say "Firefox, which upstream would skip, actually reads
++ * fine" instead of just seeing an empty string.
++ */
++export function wouldUpstreamSkipDebugRendererInfo(): boolean {
+   return isGecko()
++}
++
++/**
++ * Preserved for API compatibility with upstream (it is still consulted by
++ * `getWebGlExtensions` for the extension-parameter loop). Patched to no longer
++ * suppress the read: the console warning is an acceptable cost here.
++ */
++export function shouldAvoidDebugRendererInfo(): boolean {
++  return false
+ }
+ 
++function acquireDebugRendererInfo(gl: CanvasContext): WEBGL_debug_renderer_info | null {
++  if (shouldAvoidDebugRendererInfo()) {
++    debugRendererInfoStatus = 'library-skipped'
++    return null
++  }
++  try {
++    const extension = gl.getExtension(rendererInfoExtensionName)
++    if (!extension) {
++      debugRendererInfoStatus = 'browser-blocked'
++      return null
++    }
++    debugRendererInfoStatus = 'read-succeeded'
++    return extension
++  } catch {
++    debugRendererInfoStatus = 'browser-blocked'
++    return null
++  }
++}
++
++function readUnmasked(
++  gl: CanvasContext,
++  extension: WEBGL_debug_renderer_info | null,
++  parameter: 'UNMASKED_VENDOR_WEBGL' | 'UNMASKED_RENDERER_WEBGL',
++): string {
++  if (!extension) {
++    return ''
++  }
++  try {
++    const value = gl.getParameter(extension[parameter])?.toString() ?? ''
++    if (!value) {
++      debugRendererInfoStatus = 'browser-blocked'
++    }
++    return value
++  } catch {
++    debugRendererInfoStatus = 'browser-blocked'
++    return ''
++  }
++}
++/** ── END EXPERIMENT PATCH ──────────────────────────────────────────────────── */
++
+ /**
+  * Some browsers print a console warning when the WEBGL_polygon_mode extension is requested.
+  * JS Agent aims to avoid printing messages to console, so we avoid this extension in that browsers.
