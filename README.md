@@ -1,9 +1,7 @@
 # Browser Fingerprinting Lab
 
-A local laboratory for collecting browser fingerprints and comparing their
-behavior across repeated reads, page reloads, fresh browser sessions, and two
-test domains. Browser automation uses Selenium; a Flask server serves the probe
-and records observations as JSON Lines.
+**Is JavaScript fingerprinting still dangerous?**  
+> An automated empirical benchmarking testbed comparing browser fingerprinting defenses pitting **structural uniformity** (Tor Browser) against **per-session randomization** (Brave's farbling).
 
 ## Code layout
 

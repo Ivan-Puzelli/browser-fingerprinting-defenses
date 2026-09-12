@@ -43,7 +43,7 @@
 *.toc
 
 # --- local write-ups and research material ---------------------------------
-/paper/
+
 /paper3/
 /paper5/
 /archive/
